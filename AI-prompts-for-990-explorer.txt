@@ -1,0 +1,63 @@
+/plan This is a program that explores the connections between IRS 501(c) 3 entities via their IRS 990 forms. It's purpose is to see: who funds whom; who shares employees/boardmembers; and how else entities are connected. Review the code and associated files; You'll see that there is a database of current IRS 990 forms. The program shows relationships between entities via  graph.
+
+I want to add the ability to search for other businesses and names that appear in the IRS 990 forms.  Given the current interface, make three suggestions on how to do so. 
+
+Also, I want to explore the same thing with Political Action Committiesd (PACs). These are IRS 527 political committees.  Most 501(C)3 organizations that want to participate politically spin out a PAC.  I'd like to explore those connections as well.
+
+Here's info on PACs. There are two categories:
+
+CATEGORY 1
+
+527s Not Reporting to the FEC ("Soft Money" 527s)
+These file with the IRS and are publicly searchable:
+
+Form	Purpose
+Form 8871	Notice of 527 status (registration)
+Form 8872	Periodic report of contributions and expenditures — this is the closest analog to Form 990
+Form 1120-POL	Annual income tax return (if taxable income > $100)
+
+Form 8872 requires disclosure of contributions of $200+ (donor name, address, occupation, employer, amount, date) and expenditures of $500+ (recipient name, address, occupation, employer, amount, date, purpose).  Filing frequency is quarterly or monthly depending on the organization's chosen schedule. 
+
+Where to find them: The IRS maintains a public search tool at irs.gov/charities-non-profits/political-organizations/political-organization-filing-and-disclosure. Electronic filings go back to 2020; paper filings go back to January 2012. 
+
+ProPublica's 527 Explorer (projects.propublica.org/527-explorer) repackages the IRS data into a much more user-friendly interface with searchable donor and expenditure breakdowns.
+
+CATEGORY 2
+527s That Are Also FEC Political Committees (Super PACs, Traditional PACs)
+These file with the FEC instead of the IRS (they're exempt from Forms 8871/8872). Their reports are publicly available at fec.gov/data, searchable by committee name, candidate, amount, and report type. FEC filings are generally considered more granular and timely (including 48-hour reports in the final stretch of elections). 
+
+Key Differences from Form 990
+Form 8872 is focused on contributions and expenditures with individual-level detail (who gave, who received), not a full balance sheet/income statement like Form 990.
+There's no equivalent to Form 990's "Statement of Functional Expenses" or program service lines.
+The Form 1120-POL (annual return) is closer to a 990-T in scope — it primarily reports taxable income, not full financials.
+So the transparency is there, but it's structured differently: more transaction-level detail on money flows, less on overall financial health.
+
+
+Determine if we can download the data from the IRS and the FEC so that it runs locally like we did with the IRS 990 forms.  Determine who often the information is updated and follow the pattern set in the code to update the data.
+
+Come up with three UI strategies to incorporate these new relationships into the program.
+
+Make an implementation plan.
+---------------------------
+/plan Review this repository against our updated standards in AGENTS.md:
+
+1. Directive 3 (UI Guidelines):
+   - In server startup (server.py / server.js), format launch URLs as OSC 8
+     clickable links (\033]8;;<URL>\033\\<URL>\033]8;;\033\\) with TTY / NO_COLOR fallback.
+   - Automatically open the user's default browser window on launch unless
+     suppressed or running in headless environments (CI=true, missing DISPLAY/WAYLAND_DISPLAY).
+   - Add the '--no-browser' flag to the CLI 'serve' subcommand.
+2. Directive 12 (Documentation & Comment Discipline):
+   - Ensure each module begins with an architectural summary docstring after the SPDX header.
+   - Upgrade public functions and classes to Google Style docstrings (or JSDoc).
+   - Add '# SECURITY:' rationale comments on security invariants.
+3. Run test suite and confirm zero regressions.
+
+-----------------------------
+/plan We need to determine if we'll infringe on any patents.  Got to the US patent office and review all patents.  For any that we may infringe, provide mitigation strategies.
+
+For any expired patents that are relevent, see if there are any ideas that we can use.
+
+Provide an opinion on whether there's anything unique in our program that we can patent. If so, provide reasons why you think it's defensible.
+
+Provide a research document.

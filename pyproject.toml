@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irs990-explorer"
+version = "1.0.0"
+description = "IRS 990 Nonprofit Ultimate Funding & Relationship Social Graph Explorer"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "duckdb>=0.9.0",
+    "requests>=2.28.0",
+    "jinja2>=3.1.0"
+]
+
+[project.scripts]
+irs990-explorer = "irs990.cli:main"
+
+[tool.setuptools]
+packages = ["irs990", "irs990.assets"]
+
+[tool.setuptools.package-data]
+"irs990.assets" = ["*.js", "*.css"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
