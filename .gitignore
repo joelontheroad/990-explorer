@@ -43,7 +43,8 @@ htmlcov/
 .ruff_cache/
 
 # Local Database & Raw Ingestion Data
-data/
+data/*
+!data/irs990-explorer.desktop
 *.duckdb
 *.duckdb.wal
 
@@ -59,3 +60,6 @@ output/*.html
 *~
 .DS_Store
 Thumbs.db
+
+.agents/rules/
+.standards/
