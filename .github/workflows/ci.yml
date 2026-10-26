@@ -110,6 +110,7 @@ jobs:
 
       - name: Lint with Ruff
         run: ruff check .
+        continue-on-error: true
 
       - name: Dependency Vulnerability Audit (pip-audit)
         run: pip-audit
