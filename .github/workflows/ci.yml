@@ -34,8 +34,19 @@ jobs:
       - name: Checkout Project Code
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
+      - name: Check Standards Token Availability
+        id: token-check
+        env:
+          STANDARDS_TOKEN: ${{ secrets.STANDARDS_TOKEN }}
+        run: |
+          if [ -n "$STANDARDS_TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout Private Standards Repository
-        if: ${{ secrets.STANDARDS_TOKEN != '' }}
+        if: steps.token-check.outputs.has_token == 'true'
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           repository: joelontheroad/Software-standards
@@ -43,11 +54,11 @@ jobs:
           path: .standards
 
       - name: Run Standards Compliance Check
-        if: ${{ secrets.STANDARDS_TOKEN != '' }}
+        if: steps.token-check.outputs.has_token == 'true'
         run: python3 .standards/scripts/check-compliance.py .
 
       - name: Standards Token Advisory
-        if: ${{ secrets.STANDARDS_TOKEN == '' }}
+        if: steps.token-check.outputs.has_token != 'true'
         run: echo "::notice::STANDARDS_TOKEN secret is not configured in this repository. Skipping remote standards compliance check."
 
   detect-stack:
