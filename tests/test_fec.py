@@ -8,10 +8,12 @@ Architectural Purpose:
 """
 
 import io
+import zipfile
 import pytest
+from unittest.mock import MagicMock
 
 from irs990.storage import IRS990Storage
-from irs990.fec import FECIngester, _safe_float, _safe_fec_date
+from irs990.fec import FECIngester, FECClient, _safe_float, _safe_fec_date
 
 
 @pytest.fixture
@@ -160,3 +162,171 @@ def test_fec_stream_parsers(storage):
     assert fstats["total_operating_expenditures"] == 1
     assert fstats["operating_expenditures_volume"] == 2500000.0
     assert 2024 in fstats["cycles"]
+
+
+def test_fec_client_search_committees_mocked(storage, monkeypatch):
+    """Verify FECClient live search queries OpenFEC, parses results, and caches into DuckDB."""
+    client = FECClient(storage=storage)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "results": [
+            {
+                "committee_id": "C00634261",
+                "name": "DEFEND US PAC",
+                "committee_type": "O",
+                "committee_type_full": "Super PAC (Independent Expenditure-Only)",
+                "treasurer_name": "MCINTYRE, DUSTIN",
+                "state": "VA",
+                "city": "ARLINGTON",
+                "zip": "22307",
+                "designation": "U",
+                "cycles": [2022, 2024, 2026],
+                "affiliated_committee_name": "NONE"
+            }
+        ]
+    }
+
+    monkeypatch.setattr(client.session, "get", lambda *args, **kwargs: mock_resp)
+
+    results = client.search_committees("Defend US PAC")
+    assert len(results) == 1
+    pac = results[0]
+    assert pac["cmte_id"] == "C00634261"
+    assert pac["name"] == "DEFEND US PAC"
+    assert pac["type_label"] == "Super PAC"
+    assert pac["treasurer"] == "MCINTYRE, DUSTIN"
+
+    # Verify auto-cached into DuckDB
+    cached = storage.get_fec_committee("C00634261")
+    assert cached is not None
+    assert cached["name"] == "DEFEND US PAC"
+    assert cached["treasurer"] == "MCINTYRE, DUSTIN"
+
+
+def test_fec_client_get_committee_profile_mocked(storage, monkeypatch):
+    """Verify FECClient fetches single committee profile and normalizes into storage format."""
+    client = FECClient(storage=storage)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "results": [
+            {
+                "committee_id": "C00634261",
+                "name": "DEFEND US PAC",
+                "committee_type": "O",
+                "committee_type_full": "Super PAC (Independent Expenditure-Only)",
+                "treasurer_name": "MCINTYRE, DUSTIN",
+                "state": "VA",
+                "city": "ARLINGTON",
+                "zip": "22307",
+                "designation": "U",
+                "cycles": [2022, 2024, 2026],
+                "affiliated_committee_name": "NONE"
+            }
+        ]
+    }
+
+    monkeypatch.setattr(client.session, "get", lambda *args, **kwargs: mock_resp)
+
+    profile = client.get_committee_profile("C00634261")
+    assert profile is not None
+    assert profile["cmte_id"] == "C00634261"
+    assert profile["clean_treasurer"] == "MCINTYRE DUSTIN"
+
+
+def test_fec_ingester_sync_committees_only(storage, tmp_path):
+    """Verify sync_committees_only rapidly downloads and ingests cm.zip archive."""
+    fec_dir = tmp_path / "fec"
+    fec_dir.mkdir()
+    ingester = FECIngester(storage, download_dir=str(fec_dir))
+
+    # Create dummy cm26.zip with 1 committee line
+    cm_zip_path = fec_dir / "cm26.zip"
+    cm_line = "C00634261|DEFEND US PAC|MCINTYRE, DUSTIN|||ARLINGTON|VA|22307|U|O||Q|||\n"
+    with zipfile.ZipFile(str(cm_zip_path), "w") as zf:
+        zf.writestr("cm.txt", cm_line.encode("latin-1"))
+
+    counts = ingester.sync_committees_only(cycles=[2026], force=False)
+    assert 2026 in counts
+    assert counts[2026] == 1
+
+    cmte = storage.get_fec_committee("C00634261")
+    assert cmte is not None
+    assert cmte["name"] == "DEFEND US PAC"
+    assert cmte["cmte_type"] == "O"
+
+
+def test_fec_client_get_committee_profile_by_name_mocked(storage, monkeypatch):
+    """Verify FECClient resolves committee name to ID and then fetches committee profile."""
+    client = FECClient(storage=storage)
+
+    # Mock search_committees returning C00634261 for query "Defend US PAC"
+    search_mock = MagicMock()
+    search_mock.status_code = 200
+    search_mock.json.return_value = {
+        "results": [
+            {
+                "committee_id": "C00634261",
+                "name": "DEFEND US PAC",
+                "committee_type": "O",
+                "treasurer_name": "MCINTYRE, DUSTIN",
+                "state": "VA",
+                "city": "ARLINGTON",
+                "zip": "22307"
+            }
+        ]
+    }
+
+    profile_mock = MagicMock()
+    profile_mock.status_code = 200
+    profile_mock.json.return_value = {
+        "results": [
+            {
+                "committee_id": "C00634261",
+                "name": "DEFEND US PAC",
+                "committee_type": "O",
+                "committee_type_full": "Super PAC (Independent Expenditure-Only)",
+                "treasurer_name": "MCINTYRE, DUSTIN",
+                "state": "VA",
+                "city": "ARLINGTON",
+                "zip": "22307",
+                "designation": "U",
+                "cycles": [2026],
+                "affiliated_committee_name": "NONE"
+            }
+        ]
+    }
+
+    def mock_get(url, *args, **kwargs):
+        if "/committees" in url and "committee/" not in url:
+            return search_mock
+        return profile_mock
+
+    monkeypatch.setattr(client.session, "get", mock_get)
+
+    profile = client.get_committee_profile("Defend US PAC")
+    assert profile is not None
+    assert profile["cmte_id"] == "C00634261"
+    assert profile["name"] == "DEFEND US PAC"
+    assert profile["cmte_type"] == "O"
+
+
+def test_fec_classification_distinction():
+    """Verify that FEC labels clearly distinguish between traditional PACs and Super PACs."""
+    from irs990.fec import FEC_TYPE_LABELS, FEC_SHORT_TYPE_LABELS
+
+    # Super PAC (Independent Expenditure-Only)
+    assert "Super PAC" in FEC_TYPE_LABELS["O"]
+    assert FEC_SHORT_TYPE_LABELS["O"] == "Super PAC"
+
+    # Qualified Traditional PAC
+    assert "Traditional PAC" in FEC_TYPE_LABELS["Q"]
+    assert FEC_SHORT_TYPE_LABELS["Q"] == "Qualified PAC"
+
+    # Hybrid PAC
+    assert "Hybrid PAC" in FEC_TYPE_LABELS["V"]
+
+

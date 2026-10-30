@@ -126,4 +126,8 @@
   - For UI Bugs: The agent must verify the interaction either via browser execution or simulated DOM event testing, confirming the handler executes completely without throwing unhandled exceptions.
   - For Path / File Discovery Bugs: The agent must verify the discovery logic against realistic filename variants and directory fixtures on disk (e.g. handling `{base}.ass` as well as `{base}_voice_titles.ass`).
   - For CLI / Process Bugs: The agent must invoke the CLI entry point as a subprocess, asserting return codes and stream separation.
+- **Autonomous Remediation & Self-Healing Protocol (Zero User Intervention)**:
+  - The human developer will NEVER manually edit boilerplate, inject licenses, or prompt the AI agent to fix standards compliance issues. It is the AI agent's sole engineering responsibility to maintain repository hygiene.
+  - Whenever invoked on ANY task in this repository, the AI agent MUST autonomously run the compliance validator (`python3 scripts/check-compliance.py . --fix` or `check-standards`) during verification.
+  - If any compliance errors, missing SPDX headers, unpinned GitHub Actions, or missing Global UI Error Boundaries are detected, the agent MUST automatically remediate them and verify clean status before declaring the task complete.
 

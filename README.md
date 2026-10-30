@@ -178,7 +178,10 @@ python main.py --527 "Majority Forward"
 
 #### 13. Synchronize FEC Political Committees & PACs
 ```bash
-# Ingest 3 election cycles (2022, 2024, 2026) covering 6 years of federal PAC filings:
+# Rapid Committee Master sync (~2.5 MB total; downloads all 35,000+ PACs and campaigns in seconds):
+python main.py --sync-fec-committees
+
+# Full dataset ingest including independent expenditures and transactions (2022, 2024, 2026):
 python main.py --sync-fec
 
 # Or specify custom election cycles:
@@ -326,6 +329,7 @@ python main.py --updates
 | `--sync-527` | | `False` | Download & ingest IRS Section 527 Political Organizations (POFD bulk zip) |
 | `--sync-527-split` | | `False` | Synchronize 527 POFD using 4 smaller alphabetical archives (A-G, H-M, N-R, S-Z) |
 | `--sync-fec` | | `False` | Download & ingest FEC bulk data (default: 3 cycles: 2022, 2024, 2026) |
+| `--sync-fec-committees`, `--fec-fast` | | `False` | Rapidly download & ingest FEC Committee Master files only (~2.5 MB total for all PACs) |
 | `--fec-cycles` | | `2022,2024,2026` | Comma-separated list of election cycles to synchronize |
 | `--fec-skip-exp` | | `False` | Skip heavy transaction files for lightweight committee-only sync |
 | `--sync-all-pacs` | | `False` | Synchronize both IRS 527 POFD and FEC PACs in a single run |

@@ -120,8 +120,8 @@ class POFDIngester:
 
         for line_raw in file_obj:
             line_num += 1
-            if line_num % 50000 == 0:
-                sys.stdout.write(f"\r    Processed {line_num:,} lines (Orgs: {counts['orgs']:,}, Contribs: {counts['contributions']:,}, Exp: {counts['expenditures']:,})...")
+            if line_num % 10000 == 0:
+                sys.stdout.write(f"\r    [Streaming 527 Filings] {line_num:,} lines (Orgs: {counts['orgs']:,}, Contribs: {counts['contributions']:,}, Exp: {counts['expenditures']:,})...")
                 sys.stdout.flush()
 
             text = line_raw.decode("utf-8", errors="ignore").strip()

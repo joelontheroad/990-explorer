@@ -1,18 +1,16 @@
 # SPDX-FileCopyrightText: 2026 990-Explorer Authors
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Cross-Entity Resolution and Linkage Engine.
+"""Cross-Entity Resolution and Linkage Engine.
 
-Identifies, scores, and verifies the legal, governance, and operational bridges
-connecting IRS 501(c)(3) charities and 501(c)(4) social welfare organizations to
-IRS Section 527 political organizations and Federal Election Commission (FEC)
-political action committees (Super PACs, Hybrid PACs, and Traditional PACs).
+Architectural Purpose:
+    Identifies, scores, and verifies legal, governance, and operational bridges
+    connecting IRS 501(c)(3) charities and 501(c)(4) social welfare organizations to
+    IRS Section 527 political organizations and Federal Election Commission (FEC)
+    political action committees (Super PACs, Hybrid PACs, and Traditional PACs).
 
-Bridges Discovered:
-1. Connected Organizations: FEC CONNECTED_ORG_NM and Form 8871 Part IV related entities.
-2. Leadership Interlocks: Shared board officers, trustees, and PAC treasurers.
-3. Shared Vendors: Commercial political consultants and legal firms shared across entities.
-4. Schedule R Conduits: Multi-hop sister entity pipelines (501(c)(3) -> 501(c)(4) -> PAC).
+Security Invariants:
+    - Sanitizes alphanumeric strings and regex queries against injection and ReDoS attacks.
+    - Parameterizes all database queries and bounded resolution lookups.
 """
 
 import re

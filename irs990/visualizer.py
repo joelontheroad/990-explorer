@@ -40,7 +40,11 @@ def format_currency_full(val: float) -> str:
     return f"${val:,.2f}"
 
 
-HTML_TEMPLATE = """<!DOCTYPE html>
+HTML_TEMPLATE = """<!--
+SPDX-FileCopyrightText: 2026 990-Explorer Authors
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1278,7 +1282,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         
         <div class="search-box">
-            <input type="text" id="node-search" placeholder="🔍 Search organization or EIN..." autocomplete="off">
+            <input type="text" id="node-search" placeholder="🔍 Search organization, leader, PAC, Super PAC, or EIN..." autocomplete="off">
             <div class="search-suggestions" id="search-suggestions"></div>
         </div>
 
@@ -3006,18 +3010,62 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         const res = await fetch(`/api/search/omni?q=${encodeURIComponent(term)}`);
                         if (res.ok) {
                             const apiResults = await res.json();
-                            renderOmniSuggestions(localMatches, apiResults);
+                            renderOmniSuggestions(localMatches, apiResults, term);
                         }
                     } catch (err) {
-                        renderOmniSuggestions(localMatches, {});
+                        renderOmniSuggestions(localMatches, {}, term);
                     }
                 }, 200);
             } else {
-                renderOmniSuggestions(localMatches, {});
+                renderOmniSuggestions(localMatches, {}, term);
             }
         });
 
-        function renderOmniSuggestions(localMatches, apiResults) {
+        // Pressing Enter immediately selects top suggestion or triggers direct omni search
+        searchInput.addEventListener("keydown", async (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                const firstItem = suggestionsBox.querySelector(".suggestion-item");
+                if (firstItem && suggestionsBox.classList.contains("active")) {
+                    firstItem.click();
+                    return;
+                }
+                const term = searchInput.value.trim();
+                if (!term || !IS_SERVER_MODE) return;
+
+                try {
+                    const res = await fetch(`/api/search/omni?q=${encodeURIComponent(term)}`);
+                    if (res.ok) {
+                        const results = await res.json();
+                        if (results.fec_pacs && results.fec_pacs.length > 0) {
+                            suggestionsBox.classList.remove("active");
+                            openFECDrawer(results.fec_pacs[0].cmte_id);
+                            return;
+                        }
+                        if (results.pacs_527 && results.pacs_527.length > 0) {
+                            suggestionsBox.classList.remove("active");
+                            open527Drawer(results.pacs_527[0].form_id || results.pacs_527[0].ein);
+                            return;
+                        }
+                        if (results.organizations && results.organizations.length > 0) {
+                            suggestionsBox.classList.remove("active");
+                            recenterOnEntity(results.organizations[0].ein, results.organizations[0].name);
+                            return;
+                        }
+                        if (results.people && results.people.length > 0) {
+                            suggestionsBox.classList.remove("active");
+                            openPersonProfileModal(results.people[0].name);
+                            return;
+                        }
+                        showToast(`No entities found matching "${term}".`);
+                    }
+                } catch (err) {
+                    showToast("Search error: " + err.message);
+                }
+            }
+        });
+
+        function renderOmniSuggestions(localMatches, apiResults, term = "") {
             suggestionsBox.innerHTML = "";
             let hasAny = false;
 
@@ -3182,13 +3230,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 hdr.innerHTML = `<span>🗳️ Federal PACs & Super PACs</span> <span class="suggestion-badge">${fecPacs.length}</span>`;
                 suggestionsBox.appendChild(hdr);
 
-                fecPacs.slice(0, 3).forEach(item => {
+                fecPacs.slice(0, 5).forEach(item => {
                     const div = document.createElement("div");
                     div.className = "suggestion-item";
+                    const isSuper = (item.cmte_type === 'O' || (item.type_label && item.type_label.toLowerCase().includes('super pac')));
+                    const badgeStyle = isSuper ?
+                        'background:rgba(245,158,11,0.18); color:#f59e0b; border:1px solid rgba(245,158,11,0.3);' :
+                        'background:rgba(59,130,246,0.15); color:#60a5fa;';
                     const sponsor = item.connected_org ? ` • Spons: ${item.connected_org}` : '';
                     div.innerHTML = `
-                        <div class="suggestion-name">${escapeHtml(item.name)}</div>
-                        <div class="suggestion-meta">[${escapeHtml(item.type_label)}] • ID: ${item.cmte_id}${escapeHtml(sponsor)}</div>
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <div class="suggestion-name">${escapeHtml(item.name)}</div>
+                            <span style="font-size:0.68rem; padding:2px 6px; border-radius:4px; font-weight:700; ${badgeStyle}">
+                                ${escapeHtml(item.type_label)}
+                            </span>
+                        </div>
+                        <div class="suggestion-meta">ID: ${item.cmte_id} • ${escapeHtml(item.state || 'US')}${escapeHtml(sponsor)}</div>
                     `;
                     div.addEventListener("click", () => {
                         suggestionsBox.classList.remove("active");
@@ -3197,6 +3254,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     });
                     suggestionsBox.appendChild(div);
                 });
+            } else if (IS_SERVER_MODE && (term.includes("pac") || term.includes("527") || term.includes("committ") || term.includes("super"))) {
+                hasAny = true;
+                const hintDiv = document.createElement("div");
+                hintDiv.className = "suggestion-item";
+                hintDiv.style.background = "rgba(59, 130, 246, 0.08)";
+                hintDiv.style.borderLeft = "3px solid var(--accent-primary, #3b82f6)";
+                hintDiv.innerHTML = `
+                    <div class="suggestion-name" style="color:var(--text-primary); font-weight:600;">⚡ Quick-Sync FEC Federal PACs</div>
+                    <div class="suggestion-meta">Populate 35k+ registered federal PACs & Super PACs into local database (~2.5 MB)</div>
+                `;
+                hintDiv.addEventListener("click", async () => {
+                    suggestionsBox.classList.remove("active");
+                    showToast("⏳ Rapidly syncing FEC Committee Master data in background...");
+                    try {
+                        const res = await fetch("/api/fec/sync-committees");
+                        if (res.ok) {
+                            const data = await res.json();
+                            showToast(`✅ Ingested ${data.total_ingested || 0} FEC committees! Search again.`);
+                        } else {
+                            showToast("⚠️ Could not sync FEC committees from upstream.");
+                        }
+                    } catch (e) {
+                        showToast("⚠️ Sync error: " + e.message);
+                    }
+                });
+                suggestionsBox.appendChild(hintDiv);
             }
 
             if (!hasAny) {
@@ -3440,8 +3523,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     throw new Error("FEC Committee dossier not bundled in this offline snapshot");
                 }
 
+                const isSuper = (cmte.cmte_type === 'O' || (cmte.type_label && cmte.type_label.toLowerCase().includes('super pac')));
+                const typeBadge = isSuper ?
+                    `<span style="background:rgba(245,158,11,0.18); color:#f59e0b; border:1px solid rgba(245,158,11,0.3); padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.75rem;">Super PAC</span>` :
+                    `<span style="background:rgba(59,130,246,0.15); color:#60a5fa; padding:2px 8px; border-radius:4px; font-weight:600; font-size:0.75rem;">${escapeHtml(cmte.type_label || 'PAC')}</span>`;
+
                 document.getElementById("drawer-org-name").textContent = "🗳️ " + cmte.name;
-                document.getElementById("drawer-org-meta").textContent = `FEC ID: ${cmte.cmte_id} • ${cmte.type_label} • Cycle: ${cmte.cycle || 'Active'}`;
+                document.getElementById("drawer-org-meta").innerHTML = `FEC ID: ${cmte.cmte_id} • ${typeBadge} • Cycle: ${cmte.cycle || 'Active'}`;
 
                 const inGraph = Boolean(nodesDataset && nodesDataset.get(cmte.cmte_id));
                 const cmteGraphBtn = inGraph ?
@@ -4000,16 +4088,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 
 class VisualizerGenerator:
-    def __init__(self):
+    """HTML visualization generator embedding Vis.js network graph and data payloads."""
+
+    def __init__(self) -> None:
+        """Initialize generator and load locally bundled CSS and JavaScript assets."""
         self.vis_js_content = ""
         self.vis_css_content = ""
         self._load_assets()
 
-    def _load_assets(self):
-        """Load embedded Vis.js scripts and stylesheets."""
+    def _load_assets(self) -> None:
+        """Load embedded Vis.js scripts and stylesheets from local assets directory."""
         js_path = os.path.join(ASSETS_DIR, "vis-network.min.js")
         css_path = os.path.join(ASSETS_DIR, "vis-network.min.css")
 
+        # SECURITY: Verify assets exist locally to prevent remote CDN dependencies per Directive 3
         if os.path.exists(js_path):
             with open(js_path, "r", encoding="utf-8") as f:
                 self.vis_js_content = f.read()
@@ -4023,9 +4115,23 @@ class VisualizerGenerator:
         else:
             self.vis_css_content = "/* Vis.css */"
 
-    def generate_html(self, graph: NetworkGraph, output_filepath: str, is_server_mode: bool = False, storage: Optional[Any] = None) -> str:
-        """
-        Generate standalone self-contained HTML file from NetworkGraph.
+    def generate_html(
+        self,
+        graph: NetworkGraph,
+        output_filepath: str,
+        is_server_mode: bool = False,
+        storage: Optional[Any] = None
+    ) -> str:
+        """Generate a standalone self-contained HTML visualization from NetworkGraph.
+
+        Args:
+            graph: Populated NetworkGraph instance with nodes and edges.
+            output_filepath: Destination filesystem path for HTML file.
+            is_server_mode: If True, activates dynamic server API synchronization hooks.
+            storage: Optional active DuckDB storage backend for pre-populating dossiers.
+
+        Returns:
+            Absolute filepath string of the generated HTML output.
         """
         expenses_dict = {}
         contractors_dict = {}

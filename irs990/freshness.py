@@ -36,14 +36,26 @@ FEC_MAX_AGE_DAYS = 14       # FEC publishes regular updates during election cycl
 
 
 class DataFreshnessChecker:
-    def __init__(self, storage: IRS990Storage, timeout_sec: int = 5):
+    """Inspector checking remote government endpoints for upstream data updates."""
+
+    def __init__(self, storage: IRS990Storage, timeout_sec: int = 5) -> None:
+        """Initialize data freshness checker with local storage and network timeout.
+
+        Args:
+            storage: Active DuckDB storage interface instance.
+            timeout_sec: Maximum timeout in seconds for upstream HTTP HEAD probes.
+        """
         self.storage = storage
         self.timeout_sec = timeout_sec
 
     def probe_remote_last_modified(self, url: str) -> Optional[datetime]:
-        """
-        Send a lightweight HTTP HEAD request to retrieve the Last-Modified header.
-        Zero payload bandwidth used. Returns UTC datetime or None if unreachable.
+        """Send a zero-bandwidth HTTP HEAD probe to retrieve upstream Last-Modified timestamp.
+
+        Args:
+            url: Upstream government endpoint URL.
+
+        Returns:
+            UTC datetime object if available; None if unreachable or unsupported.
         """
         req = urllib.request.Request(
             url,
@@ -51,6 +63,7 @@ class DataFreshnessChecker:
             headers={"User-Agent": "IRS-990-Explorer/2.0 (Data-Freshness-Check)"}
         )
         try:
+            # SECURITY: Enforce strict socket timeout on upstream HTTP HEAD probes
             with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
                 lm_header = resp.headers.get("Last-Modified")
                 if lm_header:
@@ -66,8 +79,10 @@ class DataFreshnessChecker:
         return None
 
     def check_bmf_freshness(self) -> Dict[str, Any]:
-        """
-        Check if local IRS Business Master File (BMF) is out of date compared to IRS.gov.
+        """Evaluate whether local IRS Business Master File (BMF) data is out of date.
+
+        Returns:
+            Dictionary containing freshness status, timestamps, and age in days.
         """
         meta_list = self.storage.get_ingestion_metadata()
         bmf_meta = next((m for m in meta_list if m["source_id"] == "IRS_BMF"), None)

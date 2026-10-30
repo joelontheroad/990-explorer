@@ -424,3 +424,79 @@ def test_server_security_headers(live_server):
         assert headers.get("X-Frame-Options") == "DENY"
         assert headers.get("Referrer-Policy") == "no-referrer"
 
+
+def test_server_api_search_omni_live_fec_fallback(live_server, monkeypatch):
+    """Test /api/search/omni falls back to OpenFEC live search when local PAC results are sparse."""
+    from irs990.fec import FECClient
+    mock_client = FECClient(storage=live_server["storage"])
+    monkeypatch.setattr(
+        mock_client,
+        "search_committees",
+        lambda q, limit=6: [
+            {
+                "cmte_id": "C00634261",
+                "name": "DEFEND US PAC",
+                "cmte_type": "O",
+                "type_label": "Super PAC",
+                "connected_org": "",
+                "treasurer": "MCINTYRE, DUSTIN",
+                "state": "VA",
+                "party": "",
+                "cycle": 2026,
+                "type": "fec_committee"
+            }
+        ]
+    )
+    IRS990RequestHandler.fec_client = mock_client
+
+    url = f"{live_server['base_url']}/api/search/omni?q=Defend+US+PAC"
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert "fec_pacs" in data
+        assert len(data["fec_pacs"]) == 1
+        assert data["fec_pacs"][0]["cmte_id"] == "C00634261"
+        assert data["fec_pacs"][0]["name"] == "DEFEND US PAC"
+
+
+def test_server_api_fec_committee_live_fallback(live_server, monkeypatch):
+    """Test /api/fec/committee falls back to live profile fetch when committee is not local."""
+    from irs990.fec import FECClient
+    mock_client = FECClient(storage=live_server["storage"])
+    monkeypatch.setattr(
+        mock_client,
+        "get_committee_profile",
+        lambda cmte_id: {
+            "cmte_id": "C00634261",
+            "name": "DEFEND US PAC",
+            "cmte_name": "DEFEND US PAC",
+            "treasurer": "MCINTYRE, DUSTIN",
+            "clean_treasurer": "MCINTYRE DUSTIN",
+            "city": "ARLINGTON",
+            "state": "VA",
+            "zip": "22307",
+            "cmte_designation": "U",
+            "cmte_type": "O",
+            "type_label": "Super PAC",
+            "party": "",
+            "org_type": "",
+            "connected_org": "",
+            "candidate_id": "",
+            "cycle": 2026,
+            "candidates": [],
+            "expenditures_summary": {"supporting": [], "opposing": [], "contributions": []},
+            "top_vendors": []
+        }
+    )
+    IRS990RequestHandler.fec_client = mock_client
+
+    url = f"{live_server['base_url']}/api/fec/committee/C00634261"
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["cmte_id"] == "C00634261"
+        assert data["name"] == "DEFEND US PAC"
+
+

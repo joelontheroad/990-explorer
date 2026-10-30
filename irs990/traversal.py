@@ -6,6 +6,10 @@ Architectural Purpose:
     Implements bidirectional breadth-first search (BFS) recursive traversal
     with cycle prevention, multi-year grant edge aggregation, pruning,
     Schedule R corporate hierarchy expansion, and PAC bridge connectivity.
+
+Security Invariants:
+    - Bounded recursion depth and visited sets prevent cyclic graph denial-of-service (DoS).
+    - Edge volume limits (top_n_per_hop) prevent memory exhaustion.
 """
 
 import logging
@@ -25,7 +29,15 @@ logger = logging.getLogger(__name__)
 
 
 class FundingTraversalEngine:
-    def __init__(self, storage: IRS990Storage, client: Optional[ProPublicaClient] = None):
+    """Graph traversal engine for exploring financial and governance networks."""
+
+    def __init__(self, storage: IRS990Storage, client: Optional[ProPublicaClient] = None) -> None:
+        """Initialize traversal engine with storage backend and optional ProPublica client.
+
+        Args:
+            storage: Active DuckDB storage interface instance.
+            client: Optional ProPublica API client for on-demand return fetching.
+        """
         self.storage = storage
         self.client = client or ProPublicaClient(storage)
 
@@ -41,11 +53,21 @@ class FundingTraversalEngine:
         include_schedule_r: bool = True,
         include_pacs: bool = True
     ) -> NetworkGraph:
-        """
-        Execute anchor-centric traversal. The Anchor Entity is the primary hub.
-        Direct inflows and outflows are expanded up to top_n_per_hop.
-        Secondary nodes connect to the Anchor and mutual cross-edges are added without
-        spawning competing 'sub anchor' starburst clusters.
+        """Execute anchor-centric graph traversal starting from a root entity.
+
+        Args:
+            target_ein: Anchor organization EIN.
+            direction: Funding flow direction: 'upstream', 'downstream', or 'both'.
+            max_depth: Maximum recursive traversal depth limit (number of funding hops).
+            min_grant_amt: Minimum dollar threshold for grant edge inclusion.
+            start_year: Optional filter for earliest tax year.
+            end_year: Optional filter for latest tax year.
+            top_n_per_hop: Maximum branch count per node hop to maintain readability.
+            include_schedule_r: If True, include corporate relationship edges.
+            include_pacs: If True, include PAC and 527 political connections.
+
+        Returns:
+            NetworkGraph containing populated nodes, grant edges, and relationships.
         """
         # Ensure target node exists and has details
         target_node = self.storage.get_organization(target_ein)

@@ -74,18 +74,36 @@ CREATE INDEX IF NOT EXISTS idx_bmf_fnd ON irs_bmf(foundation);
 
 
 class BMFIngester:
-    def __init__(self, storage: IRS990Storage, download_dir: str = BMF_DATA_DIR):
+    """Ingestion engine for the IRS Exempt Organizations Business Master File (EO BMF)."""
+
+    def __init__(self, storage: IRS990Storage, download_dir: str = BMF_DATA_DIR) -> None:
+        """Initialize BMF ingester with database storage and download directory.
+
+        Args:
+            storage: Active DuckDB storage interface instance.
+            download_dir: Filesystem path for staging bulk CSV files.
+        """
         self.storage = storage
         self.download_dir = download_dir
         os.makedirs(self.download_dir, exist_ok=True)
         self._init_table()
 
-    def _init_table(self):
+    def _init_table(self) -> None:
         """Ensure irs_bmf table exists in storage DuckDB."""
         self.storage.conn.execute(BMF_SCHEMA_SQL)
 
     def download_file(self, url: str, dest_path: str, label: str, force: bool = False) -> str:
-        """Download a file with streaming progress display."""
+        """Download a remote CSV file with streaming progress display.
+
+        Args:
+            url: Upstream IRS download URL.
+            dest_path: Destination local filesystem path.
+            label: Human-readable region label for progress output.
+            force: If True, forces re-download even if already cached.
+
+        Returns:
+            Path to downloaded file.
+        """
         if os.path.exists(dest_path) and not force:
             file_size_mb = os.path.getsize(dest_path) / (1024 * 1024)
             print(f"  [Cached] {label}: {os.path.basename(dest_path)} ({file_size_mb:.1f} MB already downloaded)")
@@ -95,6 +113,7 @@ class BMFIngester:
         req = urllib.request.Request(url, headers={"User-Agent": "IRS-990-Explorer/2.0"})
         start_time = time.time()
 
+        # SECURITY: Stream download in chunks to prevent memory exhaustion (DoS)
         with urllib.request.urlopen(req) as resp, open(dest_path, "wb") as out_f:
             total_size = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
@@ -121,10 +140,17 @@ class BMFIngester:
         return dest_path
 
     def sync(self, force_download: bool = False, max_files: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Download and ingest all BMF regional CSV files directly into DuckDB.
+        """Download and ingest all BMF regional CSV files directly into DuckDB.
+
         Performs pre-flight freshness check against official IRS servers to skip
         redundant downloading and re-indexing when local data is already up to date.
+
+        Args:
+            force_download: If True, bypasses freshness checks and forces fresh download.
+            max_files: Optional limit on count of regional files to ingest.
+
+        Returns:
+            Dictionary containing sync status, elapsed time, and record totals.
         """
         # Pre-flight Freshness & Status Check
         if not force_download:

@@ -23,15 +23,40 @@ import os
 import sys
 import logging
 import threading
+import secrets
+import mimetypes
 from typing import Optional, Any, Dict, List
 
 from .storage import IRS990Storage, DEFAULT_DB_PATH
 from .client import ProPublicaClient
+from .fec import FECClient, FECIngester
 from .seeds import load_seed_data
 from .traversal import FundingTraversalEngine
 from .visualizer import VisualizerGenerator, format_currency
+from .security import is_headless_environment, sanitize_log_path
 
 logger = logging.getLogger("irs990-server")
+
+# SECURITY: Initialize standard shared MIME database per Directive 5
+mimetypes.init()
+
+
+def get_verified_content_type(filename_or_ext: str, default: str = "text/plain; charset=utf-8") -> str:
+    """Determine MIME type using standard system MIME database (shared-mime-info-spec).
+
+    Args:
+        filename_or_ext: File name or extension (e.g. 'index.html', 'data.json').
+        default: Fallback MIME type if extension is unrecognized.
+
+    Returns:
+        Verified Content-Type string with UTF-8 charset if text-based.
+    """
+    guessed, _ = mimetypes.guess_type(filename_or_ext)
+    if not guessed:
+        return default
+    if guessed.startswith("text/") or guessed in ("application/json", "application/javascript"):
+        return f"{guessed}; charset=utf-8"
+    return guessed
 
 
 def format_clickable_url(url: str, label: Optional[str] = None, stream=None) -> str:
@@ -58,29 +83,16 @@ def format_clickable_url(url: str, label: Optional[str] = None, stream=None) -> 
     return text
 
 
-def is_headless_environment() -> bool:
-    """Detect whether the process is executing in a headless or continuous integration context.
-
-    Evaluates standard environment flags (CI=true) and checks for active graphical
-    display servers on Linux systems (DISPLAY or WAYLAND_DISPLAY).
-
-    Returns:
-        True if running in a headless or CI environment; False otherwise.
-    """
-    # SECURITY: Prevent subprocess or browser launch failures in containerized or headless CI
-    if os.environ.get("CI", "").lower() in ("true", "1", "yes"):
-        return True
-    if sys.platform.startswith("linux"):
-        return not bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-    return False
 
 
 class IRS990RequestHandler(http.server.SimpleHTTPRequestHandler):
     storage: IRS990Storage = None
     client: ProPublicaClient = None
+    fec_client: Optional[FECClient] = None
     engine: FundingTraversalEngine = None
     generator: VisualizerGenerator = None
     default_ein: str = "51-0198509"
+    launch_token: Optional[str] = None
     lock: threading.Lock = threading.Lock()
 
     def do_GET(self):
@@ -102,6 +114,8 @@ class IRS990RequestHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_api_527_org(query, path)
         elif path.startswith("/api/fec/committee"):
             self.handle_api_fec_committee(query, path)
+        elif path == "/api/fec/sync-committees":
+            self.handle_api_fec_sync_committees()
         elif path.startswith("/api/organization/") and path.endswith("/spending"):
             parts = path.strip("/").split("/")
             if len(parts) == 4:
@@ -215,13 +229,17 @@ class IRS990RequestHandler(http.server.SimpleHTTPRequestHandler):
         )
 
         content = html.encode("utf-8")
+        content_type = get_verified_content_type("index.html", default="text/html; charset=utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         # SECURITY: Set HTTP security headers per Directive 5
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline' data:; frame-ancestors 'none';")
+        if self.launch_token:
+            self.send_header("Set-Cookie", f"irs990_token={self.launch_token}; Path=/; SameSite=Strict; HttpOnly")
         self.end_headers()
         self.wfile.write(content)
 
@@ -382,6 +400,20 @@ class IRS990RequestHandler(http.server.SimpleHTTPRequestHandler):
                             "type": "organization"
                         })
 
+            # Fallback to OpenFEC API for federal PACs if local is sparse
+            if len(results.get("fec_pacs", [])) < 3 and len(q) >= 2:
+                try:
+                    client_fec = self.fec_client or FECClient(self.storage)
+                    live_pacs = client_fec.search_committees(q, limit=6)
+                    existing_cmtes = set(p["cmte_id"] for p in results.get("fec_pacs", []))
+                    if "fec_pacs" not in results:
+                        results["fec_pacs"] = []
+                    for p in live_pacs:
+                        if p["cmte_id"] not in existing_cmtes:
+                            results["fec_pacs"].append(p)
+                except Exception as e:
+                    logger.debug(f"OpenFEC live search fallback error: {e}")
+
         self.send_json_response(results)
 
     def handle_api_contractor_dossier(self, query):
@@ -425,11 +457,33 @@ class IRS990RequestHandler(http.server.SimpleHTTPRequestHandler):
 
         with self.lock:
             profile = self.storage.get_fec_committee(cmte_id)
+            if not profile:
+                try:
+                    client_fec = self.fec_client or FECClient(self.storage)
+                    profile = client_fec.get_committee_profile(cmte_id)
+                except Exception as e:
+                    logger.debug(f"Live FEC committee fetch error: {e}")
 
         if not profile:
             self.send_json_response({"error": f"FEC Committee '{cmte_id}' not found"}, status=404)
         else:
             self.send_json_response(profile)
+
+    def handle_api_fec_sync_committees(self):
+        """API: Rapidly sync FEC Committee Master records only."""
+        with self.lock:
+            try:
+                ingester = FECIngester(self.storage)
+                counts = ingester.sync_committees_only(cycles=[2022, 2024, 2026])
+                total = sum(counts.values())
+                self.send_json_response({
+                    "status": "success",
+                    "total_ingested": total,
+                    "cycles": counts
+                })
+            except Exception as e:
+                logger.error(f"Failed rapid committee sync: {e}")
+                self.send_json_response({"status": "error", "message": str(e)}, status=500)
 
     def handle_api_organization_linkages(self, ein: str):
         """API: Fetch all resolved PAC and 527 linkages for a non-profit organization."""
@@ -463,6 +517,23 @@ class IRS990RequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_api_export(self):
         """API: Export active graph to standalone portable HTML."""
+        # SECURITY: Validate launch token on mutation endpoints per Directive 5
+        if self.launch_token:
+            token_valid = False
+            cookie_hdr = self.headers.get("Cookie", "")
+            if f"irs990_token={self.launch_token}" in cookie_hdr:
+                token_valid = True
+            elif self.headers.get("X-Launch-Token") == self.launch_token:
+                token_valid = True
+            else:
+                query_dict = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                if query_dict.get("token", [""])[0] == self.launch_token:
+                    token_valid = True
+
+            if not token_valid:
+                self.send_json_response({"error": "Forbidden: Invalid or missing launch token"}, status=403)
+                return
+
         try:
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length).decode("utf-8")
@@ -635,14 +706,16 @@ class IRS990RequestHandler(http.server.SimpleHTTPRequestHandler):
             status: HTTP status code. Defaults to 200.
         """
         content = json.dumps(data).encode("utf-8")
+        content_type = get_verified_content_type("data.json", default="application/json; charset=utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Access-Control-Allow-Origin", "*")
         # SECURITY: Set HTTP security headers per Directive 5
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline' data:; frame-ancestors 'none';")
         self.end_headers()
         self.wfile.write(content)
 
@@ -653,7 +726,9 @@ class IRS990RequestHandler(http.server.SimpleHTTPRequestHandler):
             format: Log message format string.
             *args: Variable positional arguments for string interpolation.
         """
-        logger.info(f"{self.address_string()} - {format % args}")
+        # SECURITY: Sanitize client address and request logs per Directive 1
+        client_addr = sanitize_log_path(self.address_string())
+        logger.info(f"{client_addr} - {format % args}")
 
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -689,15 +764,19 @@ def start_server(
     load_seed_data(storage)
 
     # Bind handler class variables
+    fec_client = FECClient(storage)
     IRS990RequestHandler.storage = storage
     IRS990RequestHandler.client = client
+    IRS990RequestHandler.fec_client = fec_client
     IRS990RequestHandler.engine = engine
     IRS990RequestHandler.generator = generator
     IRS990RequestHandler.default_ein = target_ein
 
     # SECURITY: Local web servers must bind strictly to 127.0.0.1 by default per Directive 5.
     server = ThreadedHTTPServer((host, port), IRS990RequestHandler)
-    url = f"http://{host}:{port}/?ein={target_ein}"
+    launch_token = secrets.token_hex(32)
+    IRS990RequestHandler.launch_token = launch_token
+    url = f"http://{host}:{port}/?token={launch_token}&ein={target_ein}"
 
     # Directive 3: Format launch URL as OSC 8 hyperlink on interactive TTY and route to stderr
     clickable_url = format_clickable_url(url, stream=sys.stderr)

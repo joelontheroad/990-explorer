@@ -33,7 +33,15 @@ EIN_ALIASES: Dict[str, str] = {
 
 
 class ProPublicaClient:
-    def __init__(self, storage: Optional[IRS990Storage] = None, rate_limit_delay: float = 0.2):
+    """HTTP client interface for querying ProPublica Nonprofit Explorer and IRS XML archives."""
+
+    def __init__(self, storage: Optional[IRS990Storage] = None, rate_limit_delay: float = 0.2) -> None:
+        """Initialize ProPublica client session and rate limiter.
+
+        Args:
+            storage: Optional local DuckDB storage interface for caching returns.
+            rate_limit_delay: Delay in seconds between upstream queries.
+        """
         self.storage = storage
         self.rate_limit_delay = rate_limit_delay
         self.session = requests.Session()
@@ -43,9 +51,14 @@ class ProPublicaClient:
         })
 
     def search_organizations(self, query: str, state: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        Search ProPublica Nonprofit Explorer by name or keyword.
-        Returns list of matching organization summaries.
+        """Search ProPublica Nonprofit Explorer by name or keyword.
+
+        Args:
+            query: Organization name or search phrase.
+            state: Optional two-letter US state code filter.
+
+        Returns:
+            List of matching organization summary dictionaries.
         """
         params: Dict[str, Any] = {"q": query}
         if state:
@@ -54,6 +67,7 @@ class ProPublicaClient:
         url = f"{PROPUBLICA_API_BASE}/search.json"
         try:
             time.sleep(self.rate_limit_delay)
+            # SECURITY: Enforce strict HTTP request timeouts to prevent hung sockets
             resp = self.session.get(url, params=params, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
@@ -65,8 +79,13 @@ class ProPublicaClient:
         return []
 
     def resolve_ein(self, query_or_ein: str) -> Optional[str]:
-        """
-        Take either an EIN string or organization name, and return verified standard EIN.
+        """Resolve either an EIN or organization name to a standard 9-digit EIN.
+
+        Args:
+            query_or_ein: Input string containing either an EIN or organization title.
+
+        Returns:
+            Normalized standard EIN string (XX-XXXXXXX), or None if unresolved.
         """
         cleaned = clean_ein(query_or_ein)
         if len(cleaned.replace("-", "")) == 9:
@@ -80,8 +99,14 @@ class ProPublicaClient:
         return None
 
     def get_organization(self, ein: str, force_refresh: bool = False) -> Optional[OrganizationNode]:
-        """
-        Fetch organization by EIN, checking local storage first unless force_refresh is True.
+        """Fetch organization profile by EIN, checking local storage first.
+
+        Args:
+            ein: Target organization EIN.
+            force_refresh: If True, bypasses local database cache and queries upstream.
+
+        Returns:
+            Populated OrganizationNode instance, or None if not found.
         """
         std_ein = clean_ein(ein)
         if not std_ein:
@@ -126,9 +151,13 @@ class ProPublicaClient:
         return None
 
     def get_latest_xml_object_id(self, ein: str) -> Optional[str]:
-        """
-        Locate the most recent electronic Form 990 XML return object_id for an organization.
-        Queries the ProPublica organization page and filing index.
+        """Locate the most recent electronic Form 990 XML return object_id.
+
+        Args:
+            ein: Target organization EIN.
+
+        Returns:
+            IRS submission object ID string, or None if no electronic filing is found.
         """
         std_ein = clean_ein(ein)
         if not std_ein:
@@ -145,6 +174,7 @@ class ProPublicaClient:
             page_url = f"https://projects.propublica.org/nonprofits/organizations/{clean}"
             try:
                 time.sleep(self.rate_limit_delay)
+                # SECURITY: Enforce request timeout to avoid connection hanging
                 resp = self.session.get(page_url, timeout=12)
                 if resp.status_code == 200:
                     oids = re.findall(r'object_id=(\d+)', resp.text)
@@ -157,6 +187,7 @@ class ProPublicaClient:
             try:
                 api_url = f"{PROPUBLICA_API_BASE}/organizations/{clean}.json"
                 time.sleep(self.rate_limit_delay)
+                # SECURITY: Enforce request timeout to avoid connection hanging
                 r = self.session.get(api_url, timeout=12)
                 if r.status_code == 200:
                     data = r.json()
@@ -175,9 +206,16 @@ class ProPublicaClient:
         return None
 
     def fetch_and_ingest_latest_filing(self, ein: str, force: bool = False) -> Dict[str, Any]:
-        """
-        Dynamically fetch the latest electronic Form 990 / 990-PF XML filing for an organization,
-        parse Schedule I grants and Schedule R corporate relationships, and ingest into DuckDB.
+        """Dynamically fetch and ingest latest Form 990 / 990-PF XML filing.
+
+        Parses Schedule I grants, Schedule R affiliations, and compensation into DuckDB.
+
+        Args:
+            ein: Target organization EIN.
+            force: If True, forces re-download even if already cached locally.
+
+        Returns:
+            Dictionary containing operation status, object ID, and record counts.
         """
         std_ein = clean_ein(ein)
         if not std_ein:

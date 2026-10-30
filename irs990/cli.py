@@ -18,7 +18,7 @@ import argparse
 import sys
 import os
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any, List, Tuple
 
 from . import __version__
 from .models import OrganizationNode
@@ -31,7 +31,7 @@ from .bulk import BulkIngester
 from .parser import clean_ein
 from .bmf import BMFIngester
 from .pofd import POFDIngester
-from .fec import FECIngester, DEFAULT_FEC_CYCLES
+from .fec import FECIngester, FECClient, DEFAULT_FEC_CYCLES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -280,6 +280,13 @@ def parse_args(args: Optional[list] = None) -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--sync-fec-committees", "--fec-fast",
+        action="store_true",
+        dest="sync_fec_committees",
+        help="Rapidly synchronize FEC Committee Master records only (~870 KB per cycle; all 35k+ PACs in seconds)"
+    )
+
+    parser.add_argument(
         "--sync-all-pacs",
         action="store_true",
         help="Synchronize both IRS Section 527 Political Organizations and FEC federal PACs"
@@ -411,6 +418,18 @@ def parse_args(args: Optional[list] = None) -> argparse.Namespace:
         help="Run interactive explorer server as a detached background daemon process"
     )
 
+    parser.add_argument(
+        "--reset-config",
+        action="store_true",
+        help="Permanently reset local configuration and presets without moving data to Desktop Trash"
+    )
+
+    parser.add_argument(
+        "--reveal",
+        action="store_true",
+        help="Reveal generated HTML output or database file in desktop file manager (Directive 11)"
+    )
+
     subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
     serve_parser = subparsers.add_parser(
         "serve",
@@ -458,9 +477,33 @@ def parse_args(args: Optional[list] = None) -> argparse.Namespace:
         help="Run interactive explorer server as a detached background daemon process"
     )
 
+    config_parser = subparsers.add_parser(
+        "config",
+        help="Configuration and preset management",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    config_sub = config_parser.add_subparsers(dest="config_action", help="Config actions")
+    reset_parser = config_sub.add_parser(
+        "reset",
+        help="Permanently reset local configuration, presets, and state files"
+    )
+    reset_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Also permanently purge DuckDB database and downloaded bulk dataset caches"
+    )
+    reset_parser.add_argument(
+        "--db-path",
+        type=str,
+        default=DEFAULT_DB_PATH,
+        help="Path to local DuckDB database"
+    )
+
     parsed = parser.parse_args(args)
     if parsed.subcommand == "serve":
         parsed.serve = True
+    elif parsed.subcommand == "config" and getattr(parsed, "config_action", None) == "reset":
+        parsed.reset_config = True
     return parsed
 
 
@@ -758,14 +801,33 @@ def display_527_report(storage: IRS990Storage, query: str) -> None:
     print("=" * 76 + "\n")
 
 
-def display_omni_search_report(storage: IRS990Storage, query: str) -> None:
+def display_omni_search_report(storage: Optional[IRS990Storage], query: str, results: Optional[Dict[str, Any]] = None) -> None:
     """Execute unified multi-entity search across nonprofits, leaders, vendors, and PACs.
 
     Args:
-        storage: Active DuckDB storage interface instance.
+        storage: Active DuckDB storage interface instance, or None if proxied.
         query: Full-text search term.
+        results: Optional pre-fetched search results dictionary.
     """
-    results = storage.search_omni(query, limit=8)
+    if results is None and storage:
+        results = storage.search_omni(query, limit=8)
+
+        # Live OpenFEC fallback if local FEC pacs are sparse
+        if len(results.get("fec_pacs", [])) < 3 and len(query.strip()) >= 2:
+            try:
+                fec_client = FECClient(storage)
+                live_pacs = fec_client.search_committees(query.strip(), limit=5)
+                existing_cmtes = set(p["cmte_id"] for p in results.get("fec_pacs", []))
+                if "fec_pacs" not in results:
+                    results["fec_pacs"] = []
+                for p in live_pacs:
+                    if p["cmte_id"] not in existing_cmtes:
+                        results["fec_pacs"].append(p)
+            except Exception as e:
+                logger.debug(f"Live FEC search error: {e}")
+
+    results = results or {}
+
     print("\n" + "=" * 76)
     print(f"         🔍 MULTI-ENTITY OMNI-SEARCH RESULTS FOR: '{query}'")
     print("=" * 76)
@@ -773,6 +835,11 @@ def display_omni_search_report(storage: IRS990Storage, query: str) -> None:
     total_found = sum(len(v) for v in results.values())
     if total_found == 0:
         print(f"  No records found matching '{query}'.")
+        if storage:
+            stats = storage.get_database_stats()
+            fec_stats = stats.get("fec_pacs", {})
+            if not fec_stats.get("table_present") or fec_stats.get("total_committees", 0) == 0:
+                print("  Tip: Local FEC PAC database is empty. Run 'python main.py --sync-fec-committees' to populate 35k+ PACs in seconds.")
         print("=" * 76 + "\n")
         return
 
@@ -824,22 +891,31 @@ def display_omni_search_report(storage: IRS990Storage, query: str) -> None:
     print("=" * 76 + "\n")
 
 
-def display_fec_committee_report(storage: IRS990Storage, query: str) -> None:
+def display_fec_committee_report(storage: Optional[IRS990Storage], query: str, cmte: Optional[Dict[str, Any]] = None) -> None:
     """Display comprehensive report on a Federal Election Commission (FEC) committee.
 
     Args:
-        storage: Active DuckDB storage interface instance.
+        storage: Active DuckDB storage interface instance, or None if proxied.
         query: FEC committee ID or entity name.
+        cmte: Optional pre-fetched committee dictionary.
     """
-    cmte = storage.get_fec_committee(query)
+    if not cmte and storage:
+        cmte = storage.get_fec_committee(query)
+    if not cmte:
+        try:
+            fec_client = FECClient(storage)
+            cmte = fec_client.get_committee_profile(query)
+        except Exception as e:
+            logger.debug(f"Live FEC committee fetch error: {e}")
+
     print("\n" + "=" * 76)
     print(f"     🗳️  FEDERAL ELECTION COMMISSION (FEC) COMMITTEE DOSSIER: '{query}'")
     print("=" * 76)
 
     if not cmte:
-        print(f"  No FEC committee matching '{query}' found in database.")
-        print("  Tip: Verify committee ID (e.g. 'C00580100') or committee name (e.g. 'Majority Forward', 'Senate Majority PAC').")
-        print("       Run 'python main.py --sync-fec' to download and populate FEC committees.")
+        print(f"  No FEC committee matching '{query}' found in database or live FEC query.")
+        print("  Tip: Verify committee ID (e.g. 'C00634261') or committee name (e.g. 'Majority Forward', 'Defend US PAC').")
+        print("       Run 'python main.py --sync-fec-committees' to download and populate FEC committees.")
         print("=" * 76 + "\n")
         return
 
@@ -1121,13 +1197,122 @@ def display_interlocks_report(storage: IRS990Storage) -> None:
     print("=" * 76 + "\n")
 
 
+def _try_proxy_cli_command(args, port: int = 8990) -> bool:
+    """Attempt to forward read-only CLI commands to an active running web server."""
+    import urllib.request
+    import urllib.parse
+    import json
+
+    server_url = f"http://127.0.0.1:{port}"
+
+    if getattr(args, "search", None):
+        try:
+            url = f"{server_url}/api/search/omni?q={urllib.parse.quote(args.search)}"
+            req = urllib.request.Request(url, headers={"User-Agent": "IRS990-CLI-Proxy"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    print(f"ℹ️  [Connected to active 990-Explorer Web Server on {server_url}]")
+                    display_omni_search_report(None, args.search, results=data)
+                    return True
+        except Exception as e:
+            logger.debug(f"Proxy search failed: {e}")
+            return False
+
+    if getattr(args, "fec_cmte", None):
+        try:
+            url = f"{server_url}/api/fec/committee/{urllib.parse.quote(args.fec_cmte)}"
+            req = urllib.request.Request(url, headers={"User-Agent": "IRS990-CLI-Proxy"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                if resp.status == 200:
+                    cmte = json.loads(resp.read().decode("utf-8"))
+                    print(f"ℹ️  [Connected to active 990-Explorer Web Server on {server_url}]")
+                    display_fec_committee_report(None, args.fec_cmte, cmte=cmte)
+                    return True
+        except Exception as e:
+            logger.debug(f"Proxy committee fetch failed: {e}")
+            return False
+
+    if getattr(args, "status", False):
+        try:
+            url = f"{server_url}/"
+            req = urllib.request.Request(url, headers={"User-Agent": "IRS990-CLI-Proxy"})
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status == 200:
+                    print("\n" + "=" * 76)
+                    print("      📊 IRS 990 EXPLORER — ACTIVE WEB SERVER RUNNING")
+                    print("=" * 76)
+                    print(f" 🌐 Web UI Interface:    {server_url}")
+                    print(f" 💾 Database File:       {args.db_path} (Locked by active server)")
+                    print(" 💡 Tip: Open the URL above in your browser to explore graphs, PACs, and returns.")
+                    print("         Stop the server process (Ctrl+C) to run offline bulk database sync.")
+                    print("=" * 76 + "\n")
+                    return True
+        except Exception:
+            return False
+
+    return False
+
+
 def main() -> None:
     """Execute main CLI application workflow coordinating arguments, synchronization, and traversal."""
     setup_terminal_hygiene()
     args = parse_args()
 
-    # 1. Initialize Storage
-    storage = IRS990Storage(args.db_path)
+    # Pre-parse and validate configuration file if specified
+    if getattr(args, "config", None):
+        args.config = parse_safe_file_uri(args.config)
+        try:
+            cfg = load_config(args.config)
+            # Inject config defaults where CLI args were not explicitly provided
+            if args.db_path == DEFAULT_DB_PATH and cfg.storage.db_path != DEFAULT_DB_PATH:
+                args.db_path = cfg.storage.db_path
+        except Exception as e:
+            logger.error(f"Failed to load config from {args.config}: {e}")
+            sys.exit(1)
+
+    # SECURITY: Parse and validate file paths and URIs against traversal attacks (CWE-22 / RFC 8089)
+    from .security import parse_safe_file_uri
+    if args.db_path:
+        args.db_path = parse_safe_file_uri(args.db_path)
+    if args.ingest_dir:
+        args.ingest_dir = parse_safe_file_uri(args.ingest_dir)
+    if args.ingest_zip:
+        args.ingest_zip = parse_safe_file_uri(args.ingest_zip)
+    if args.output:
+        args.output = parse_safe_file_uri(args.output)
+
+    # Directive 1: Deterministic state erasure via permanent unlinking (never move to Desktop Trash)
+    if getattr(args, "reset_config", False):
+        from .security import purge_local_state
+        include_all = getattr(args, "all", False)
+        deleted = purge_local_state(
+            include_database=include_all,
+            include_cache=include_all,
+            db_path=args.db_path
+        )
+        if deleted:
+            print("✓ Successfully purged local state (permanent unlinking):")
+            for p in deleted:
+                print(f"  • Deleted: {p}")
+        else:
+            print("✓ Local configuration and state clean. No files needed removal.")
+        return
+
+    # 1. Initialize Storage with lock guard
+    try:
+        storage = IRS990Storage(args.db_path)
+    except Exception as e:
+        err_msg = str(e)
+        if "Conflicting lock" in err_msg or "Could not set lock" in err_msg:
+            port = getattr(args, "port", 8990) or 8990
+            if _try_proxy_cli_command(args, port):
+                return
+            print(f"\n⚠️  Database Lock Conflict: DuckDB database is currently locked by another process (e.g. active 'main.py --serve').", file=sys.stderr)
+            print("   Please stop the background web server (Ctrl+C) before running bulk synchronization commands.", file=sys.stderr)
+            sys.exit(1)
+        raise
+
     client = ProPublicaClient(storage)
 
     try:
@@ -1189,6 +1374,11 @@ def main() -> None:
             ingester_527 = POFDIngester(storage)
             ingester_527.sync(force_download=args.force_download)
 
+        if args.sync_fec_committees:
+            fec_ingester = FECIngester(storage)
+            cycles = [int(c.strip()) for c in args.fec_cycles.split(",") if c.strip().isdigit()] if args.fec_cycles else None
+            fec_ingester.sync_committees_only(cycles=cycles, force=args.force_download)
+
         if args.sync_fec or args.sync_all_pacs:
             fec_ingester = FECIngester(storage)
             cycles = [int(c.strip()) for c in args.fec_cycles.split(",") if c.strip().isdigit()] if args.fec_cycles else None
@@ -1204,7 +1394,7 @@ def main() -> None:
             fec_ingester = FECIngester(storage)
             fec_ingester.sync_all_cycles(include_expenditures=not args.fec_skip_exp, force=args.force_download)
 
-        if (args.sync_bmf or args.sync_527 or args.sync_fec or args.sync_all_pacs or args.sync_all) and not (args.ein or args.name or args.serve or args.spending or args.person or args.interlocks or args.vendor or args.pac_527 or args.fec_cmte or args.search):
+        if (args.sync_bmf or args.sync_527 or args.sync_fec or args.sync_fec_committees or args.sync_all_pacs or args.sync_all) and not (args.ein or args.name or args.serve or args.spending or args.person or args.interlocks or args.vendor or args.pac_527 or args.fec_cmte or args.search):
             display_database_status(storage)
             return
 
@@ -1361,9 +1551,19 @@ def main() -> None:
         generator = VisualizerGenerator()
         final_path = generator.generate_html(graph, output_path, storage=storage)
 
-        print(f"🎉 Portable HTML visualization generated successfully:")
-        print(f"   file://{os.path.abspath(final_path)}")
-        print(f"   (You can open this standalone file directly in any web browser without a webserver)\n")
+        from .server import format_clickable_url
+        file_uri = f"file://{os.path.abspath(final_path)}"
+        clickable_link = format_clickable_url(file_uri, stream=sys.stdout)
+        print("🎉 Portable HTML visualization generated successfully:")
+        print(f"   {clickable_link}")
+        print("   (You can open this standalone file directly in any web browser without a webserver)\n")
+
+        # Directive 11: File manager integration with headless pre-flight and timeout guard
+        if getattr(args, "reveal", False):
+            from .security import reveal_in_folder
+            revealed = reveal_in_folder(final_path)
+            if not revealed:
+                logger.info(f"Reveal in folder fallback: {final_path}")
     finally:
         storage.close()
 

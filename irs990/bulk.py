@@ -32,15 +32,26 @@ logger = logging.getLogger(__name__)
 
 
 class BulkIngester:
-    def __init__(self, storage: IRS990Storage, batch_size: int = 500):
+    """Batch ingestion engine streaming bulk IRS TEOS XML files and archives into DuckDB."""
+
+    def __init__(self, storage: IRS990Storage, batch_size: int = 500) -> None:
+        """Initialize bulk ingester with target storage and batch size.
+
+        Args:
+            storage: Active DuckDB storage interface instance.
+            batch_size: Number of records to accumulate before committing to storage.
+        """
         self.storage = storage
         self.batch_size = batch_size
 
     def ingest_xml_content(self, xml_content: str) -> Tuple[int, int]:
-        """
-        Parse a single XML string, extracting filer info, grants, relationships,
-        functional expenses, top contractors, and officers/trustees/people.
-        Returns (num_grants, num_relationships).
+        """Parse raw Form 990 XML content and ingest extracted records into storage.
+
+        Args:
+            xml_content: Full text of an electronic IRS Form 990 XML document.
+
+        Returns:
+            Tuple of (grants_count, relationships_count) ingested.
         """
         header_info = parse_return_header(xml_content)
         if not header_info:
@@ -93,7 +104,14 @@ class BulkIngester:
         return len(grants), len(relationships)
 
     def ingest_file(self, file_path: str) -> Tuple[int, int]:
-        """Ingest a single .xml file from disk."""
+        """Ingest a single Form 990 XML file from disk into storage.
+
+        Args:
+            file_path: Filesystem path to XML filing.
+
+        Returns:
+            Tuple of (grants_count, relationships_count) ingested.
+        """
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
@@ -103,12 +121,20 @@ class BulkIngester:
             return 0, 0
 
     def ingest_zip(self, zip_path: str, max_files: Optional[int] = None) -> Dict[str, int]:
-        """
-        Stream XML files directly from a TEOS ZIP archive without extracting all to disk.
-        Returns stats dict.
+        """Stream Form 990 XML files directly from a TEOS ZIP archive.
+
+        Reads entries in-memory without extracting files to disk (preventing Zip Slip).
+
+        Args:
+            zip_path: Filesystem path to TEOS ZIP archive.
+            max_files: Optional maximum count of XML files to process.
+
+        Returns:
+            Dictionary containing processed file and record counts.
         """
         stats = {"files_processed": 0, "grants_ingested": 0, "relationships_ingested": 0}
         try:
+            # SECURITY: Read archive members in-memory without extracting to disk (preventing CWE-22)
             with zipfile.ZipFile(zip_path, "r") as z:
                 xml_names = [n for n in z.namelist() if n.lower().endswith(".xml")]
                 if max_files:
@@ -138,8 +164,15 @@ class BulkIngester:
         return stats
 
     def ingest_directory(self, dir_path: str, recursive: bool = True, max_files: Optional[int] = None) -> Dict[str, int]:
-        """
-        Scan a directory for XML or ZIP files and ingest them.
+        """Scan a directory for Form 990 XML or ZIP files and ingest them into storage.
+
+        Args:
+            dir_path: Filesystem directory path to scan.
+            recursive: If True, recursively searches subdirectories.
+            max_files: Optional maximum count of files to process.
+
+        Returns:
+            Dictionary containing aggregated processed file and record counts.
         """
         stats = {"files_processed": 0, "grants_ingested": 0, "relationships_ingested": 0}
         if not os.path.exists(dir_path):

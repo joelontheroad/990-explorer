@@ -477,10 +477,14 @@ SEED_PEOPLE = [
 
 
 def load_seed_data(storage: IRS990Storage, force: bool = False) -> bool:
-    """
-    Populate database with curated initial institutional seed dataset.
-    Skips redundant insertion if seeds are already loaded in database unless force=True.
-    Returns True if data was inserted, False if skipped.
+    """Populate database with curated initial institutional seed dataset.
+
+    Args:
+        storage: Active DuckDB storage interface instance.
+        force: If True, forces re-population even if seeds already exist in storage.
+
+    Returns:
+        True if seed records were inserted; False if already populated and skipped.
     """
     if not force:
         try:

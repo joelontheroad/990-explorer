@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=IRS 990 Explorer
+GenericName=Nonprofit Funding & Social Graph Explorer
+Comment=Interactive Funding & Lineage Graph Explorer for IRS Form 990 Filings
+Exec=irs990-explorer serve -- "%u"
+Terminal=true
+Categories=Office;Finance;Utility;
+Keywords=nonprofit;tax;irs990;grants;fec;pacs;charity;

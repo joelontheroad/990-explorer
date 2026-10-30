@@ -1887,6 +1887,7 @@ class IRS990Storage:
             "name": row[1],
             "cmte_name": row[1],
             "treasurer_name": row[2] or "",
+            "treasurer": row[2] or "",
             "clean_treasurer": row[3] or "",
             "city": row[4] or "",
             "state": row[5] or "",

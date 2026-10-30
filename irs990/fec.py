@@ -19,6 +19,7 @@ import urllib.request
 import zipfile
 import io
 import time
+import requests
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -33,6 +34,36 @@ FEC_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", 
 DEFAULT_FEC_CYCLES = [2022, 2024, 2026]
 
 FEC_BULK_BASE_URL = "https://www.fec.gov/files/bulk-downloads"
+FEC_API_BASE_URL = "https://api.open.fec.gov/v1"
+OPEN_FEC_DEMO_KEY = "DEMO_KEY"
+
+FEC_TYPE_LABELS: Dict[str, str] = {
+    "O": "Super PAC (Independent Expenditure-Only Committee)",
+    "V": "Hybrid PAC (With Non-Contribution Account)",
+    "Q": "Qualified Traditional PAC",
+    "N": "Nonqualified PAC",
+    "H": "House Candidate Committee",
+    "S": "Senate Candidate Committee",
+    "P": "Presidential Candidate Committee",
+    "X": "Party Committee",
+    "Z": "National Party Non-Federal Account",
+    "D": "Leadership PAC",
+    "U": "Single Candidate Independent Expenditure",
+    "C": "Communication Cost Filer"
+}
+
+FEC_SHORT_TYPE_LABELS: Dict[str, str] = {
+    "O": "Super PAC",
+    "V": "Hybrid PAC",
+    "Q": "Qualified PAC",
+    "N": "Nonqualified PAC",
+    "H": "House Candidate Comm",
+    "S": "Senate Candidate Comm",
+    "P": "Presidential Candidate Comm",
+    "X": "Party Committee",
+    "Z": "National Party Non-Federal",
+    "D": "Leadership PAC"
+}
 
 
 def _safe_float(val: str, default: float = 0.0) -> float:
@@ -164,6 +195,9 @@ class FECIngester:
             ))
             count += 1
 
+            if count % 5000 == 0:
+                print(f"      [Ingesting Committees] {count:,} records processed...", end="\r", flush=True)
+
             if len(batch) >= batch_size:
                 self.storage.upsert_fec_committees(batch)
                 batch.clear()
@@ -172,6 +206,8 @@ class FECIngester:
             self.storage.upsert_fec_committees(batch)
             batch.clear()
 
+        if count >= 5000:
+            print(f"      [Ingesting Committees] {count:,} records processed. Done!    ")
         return count
 
     def parse_cn_stream(self, file_obj, cycle: int) -> int:
@@ -219,6 +255,9 @@ class FECIngester:
             ))
             count += 1
 
+            if count % 5000 == 0:
+                print(f"      [Ingesting Candidates] {count:,} records processed...", end="\r", flush=True)
+
             if len(batch) >= batch_size:
                 self.storage.upsert_fec_candidates(batch)
                 batch.clear()
@@ -227,6 +266,8 @@ class FECIngester:
             self.storage.upsert_fec_candidates(batch)
             batch.clear()
 
+        if count >= 5000:
+            print(f"      [Ingesting Candidates] {count:,} records processed. Done!    ")
         return count
 
     def parse_ccl_stream(self, file_obj, cycle: int) -> int:
@@ -273,6 +314,9 @@ class FECIngester:
             ))
             count += 1
 
+            if count % 5000 == 0:
+                print(f"      [Ingesting Linkages] {count:,} records processed...", end="\r", flush=True)
+
             if len(batch) >= batch_size:
                 self.storage.upsert_fec_linkages(batch)
                 batch.clear()
@@ -281,6 +325,8 @@ class FECIngester:
             self.storage.upsert_fec_linkages(batch)
             batch.clear()
 
+        if count >= 5000:
+            print(f"      [Ingesting Linkages] {count:,} records processed. Done!      ")
         return count
 
     def parse_pas2_stream(self, file_obj, cycle: int) -> int:
@@ -336,6 +382,9 @@ class FECIngester:
             ))
             count += 1
 
+            if count % 10000 == 0:
+                print(f"      [Ingesting Independent Exp] {count:,} records processed...", end="\r", flush=True)
+
             if len(batch) >= batch_size:
                 self.storage.upsert_fec_transactions(batch)
                 batch.clear()
@@ -344,6 +393,8 @@ class FECIngester:
             self.storage.upsert_fec_transactions(batch)
             batch.clear()
 
+        if count >= 10000:
+            print(f"      [Ingesting Independent Exp] {count:,} records processed. Done!  ")
         return count
 
     def parse_oppexp_stream(self, file_obj, cycle: int) -> int:
@@ -390,6 +441,9 @@ class FECIngester:
             ))
             count += 1
 
+            if count % 10000 == 0:
+                print(f"      [Ingesting Vendor Disbursements] {count:,} records processed...", end="\r", flush=True)
+
             if len(batch) >= batch_size:
                 self.storage.upsert_fec_operating_expenditures(batch)
                 batch.clear()
@@ -398,6 +452,8 @@ class FECIngester:
             self.storage.upsert_fec_operating_expenditures(batch)
             batch.clear()
 
+        if count >= 10000:
+            print(f"      [Ingesting Vendor Disbursements] {count:,} records processed. Done! ")
         return count
 
     def sync_cycle(self, cycle: int, include_expenditures: bool = True, force: bool = False) -> Dict[str, int]:
@@ -486,6 +542,161 @@ class FECIngester:
 
         return counts
 
+    def _ingest_cm_native_duckdb(self, zip_path: str, cycle: int) -> Optional[int]:
+        """Fast-path native DuckDB vectorized bulk ingestion of Committee Master zip file.
+
+        Extracts cm.txt to temporary file and loads via DuckDB's C++ read_csv scanner
+        in milliseconds.
+
+        Args:
+            zip_path: Path to cm{yy}.zip file on disk.
+            cycle: 2-year election cycle year.
+
+        Returns:
+            Number of committees inserted/updated, or None on error.
+        """
+        import tempfile
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                target_name = None
+                for n in zf.namelist():
+                    if n.endswith(".txt"):
+                        target_name = n
+                        break
+                if not target_name:
+                    target_name = zf.namelist()[0]
+
+                with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tmp_f:
+                    tmp_path = tmp_f.name
+                    with zf.open(target_name) as src:
+                        while True:
+                            buf = src.read(1024 * 1024)
+                            if not buf:
+                                break
+                            tmp_f.write(buf)
+
+            try:
+                conn = self.storage.conn
+                conn.execute("""
+                    INSERT OR REPLACE INTO fec_committees
+                    SELECT
+                        trim(cmte_id) as cmte_id,
+                        trim(cmte_name) as cmte_name,
+                        coalesce(trim(tres_name), '') as treasurer_name,
+                        coalesce(upper(regexp_replace(trim(tres_name), '[^a-zA-Z0-9 ]', ' ', 'g')), '') as clean_treasurer,
+                        coalesce(trim(city), '') as city,
+                        coalesce(trim(state), '') as state,
+                        coalesce(trim(zip), '') as zip,
+                        coalesce(trim(cmte_dsg), '') as cmte_designation,
+                        coalesce(trim(cmte_tp), '') as cmte_type,
+                        coalesce(trim(pty), '') as party_affiliation,
+                        coalesce(trim(org_tp), '') as org_type,
+                        coalesce(trim(conn_org), '') as connected_org_name,
+                        coalesce(upper(regexp_replace(trim(conn_org), '[^a-zA-Z0-9 ]', ' ', 'g')), '') as clean_connected_org,
+                        coalesce(trim(cand_id), '') as candidate_id,
+                        ? as cycle
+                    FROM read_csv(?,
+                        delim='|',
+                        header=false,
+                        quote='',
+                        escape='',
+                        columns={
+                            'cmte_id': 'VARCHAR',
+                            'cmte_name': 'VARCHAR',
+                            'tres_name': 'VARCHAR',
+                            'street_1': 'VARCHAR',
+                            'street_2': 'VARCHAR',
+                            'city': 'VARCHAR',
+                            'state': 'VARCHAR',
+                            'zip': 'VARCHAR',
+                            'cmte_dsg': 'VARCHAR',
+                            'cmte_tp': 'VARCHAR',
+                            'pty': 'VARCHAR',
+                            'filing_freq': 'VARCHAR',
+                            'org_tp': 'VARCHAR',
+                            'conn_org': 'VARCHAR',
+                            'cand_id': 'VARCHAR'
+                        },
+                        null_padding=true,
+                        ignore_errors=true
+                    );
+                """, (cycle, tmp_path))
+
+                row = conn.execute("SELECT count(*) FROM fec_committees WHERE cycle = ?", (cycle,)).fetchone()
+                return row[0] if row else 0
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+        except Exception as e:
+            logger.debug(f"Native DuckDB bulk ingestion failed, falling back to stream parsing: {e}")
+            return None
+
+    def sync_committees_only(self, cycles: Optional[List[int]] = None, force: bool = False) -> Dict[int, int]:
+        """Rapid synchronization of Committee Master records only (~870 KB per cycle).
+
+        Downloads and parses cm{yy}.zip for specified cycles without downloading
+        multi-gigabyte transaction or expenditure archives.
+
+        Args:
+            cycles: List of 2-year election cycles (defaults to DEFAULT_FEC_CYCLES).
+            force: Whether to re-download if cached archive exists.
+
+        Returns:
+            Dictionary mapping cycle year to number of committees ingested.
+        """
+        target_cycles = cycles or DEFAULT_FEC_CYCLES
+        results = {}
+        total_ingested = 0
+        t_start = time.time()
+        print("\n" + "=" * 76)
+        print(" 🏛️  RAPID FEC COMMITTEE MASTER SYNCHRONIZATION")
+        print("=" * 76)
+        print(f"Target DuckDB: {self.storage.db_path}")
+        print(f"Election Cycles: {', '.join(str(c) for c in target_cycles)}\n")
+
+        for idx, cycle in enumerate(target_cycles, 1):
+            yy = str(cycle)[-2:]
+            cm_url = f"{FEC_BULK_BASE_URL}/{cycle}/cm{yy}.zip"
+            cm_dest = os.path.join(self.download_dir, f"cm{yy}.zip")
+            print(f"[{idx}/{len(target_cycles)}] Cycle {cycle} Committee Master:")
+            try:
+                self.download_file(cm_url, cm_dest, f"Committee Master {cycle}", force=force)
+                t0 = time.time()
+
+                # Fast path: vectorized DuckDB C++ scanner
+                count = self._ingest_cm_native_duckdb(cm_dest, cycle)
+                if count is None:
+                    # Fallback to stream parsing
+                    with zipfile.ZipFile(cm_dest, "r") as zf:
+                        fname = zf.namelist()[0]
+                        with zf.open(fname) as f_obj:
+                            count = self.parse_cm_stream(f_obj, cycle)
+
+                results[cycle] = count
+                total_ingested += count
+                elapsed = time.time() - t0
+                print(f"    ✅ Ingested {count:,} political committees for cycle {cycle} in {elapsed:.2f}s")
+            except Exception as e:
+                print(f"    ⚠️  Could not ingest Committee Master for {cycle}: {e}")
+                results[cycle] = 0
+
+            self.storage.record_sync(
+                f"FEC_CM_{cycle}",
+                f"FEC Committee Master Cycle {cycle}",
+                results.get(cycle, 0),
+                f"Committees: {results.get(cycle, 0)}"
+            )
+
+        total_elapsed = time.time() - t_start
+        print("\n" + "=" * 76)
+        print(f" ✅ FEC Committee Master Sync Complete ({total_elapsed:.2f}s total)")
+        print(f"    • Total Ingested / Updated: {total_ingested:,} committees across {len(target_cycles)} cycles")
+        print("=" * 76 + "\n")
+        return results
+
     def sync_all_cycles(self, cycles: Optional[List[int]] = None, include_expenditures: bool = True, force: bool = False) -> Dict[int, Dict[str, int]]:
         """Synchronize election cycles (defaults to 3 cycles: 2022, 2024, 2026)."""
         target_cycles = cycles or DEFAULT_FEC_CYCLES
@@ -493,3 +704,224 @@ class FECIngester:
         for c in target_cycles:
             results[c] = self.sync_cycle(c, include_expenditures=include_expenditures, force=force)
         return results
+
+
+class FECClient:
+    """HTTP client interface for querying the official Federal Election Commission (OpenFEC) API."""
+
+    def __init__(self, storage: Optional[IRS990Storage] = None, api_key: Optional[str] = None, rate_limit_delay: float = 0.2) -> None:
+        """Initialize OpenFEC client session and rate limiter.
+
+        Args:
+            storage: Optional DuckDB storage engine instance for caching query results.
+            api_key: Optional OpenFEC API key. Defaults to FEC_API_KEY environment variable or DEMO_KEY.
+            rate_limit_delay: Delay in seconds between API queries.
+        """
+        self.storage = storage
+        self.api_key = api_key or os.environ.get("FEC_API_KEY", OPEN_FEC_DEMO_KEY)
+        self.rate_limit_delay = rate_limit_delay
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "IRS-990-Explorer/2.0 (FEC Political Network Research; contact: researcher@example.org)",
+            "Accept": "application/json"
+        })
+
+    def search_committees(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Search Federal Election Commission political committees live via OpenFEC API.
+
+        Args:
+            query: Committee name, acronym, or FEC Committee ID (e.g. 'Defend US PAC', 'C00634261').
+            limit: Maximum number of committee records to return.
+
+        Returns:
+            List of normalized committee summary dictionaries.
+        """
+        clean_q = query.strip()
+        if not clean_q:
+            return []
+
+        url = f"{FEC_API_BASE_URL}/committees/"
+        params: Dict[str, Any] = {
+            "api_key": self.api_key,
+            "q": clean_q,
+            "per_page": min(limit, 20)
+        }
+
+        try:
+            time.sleep(self.rate_limit_delay)
+            # SECURITY: Enforce request timeout to avoid hung network connections
+            resp = self.session.get(url, params=params, timeout=12)
+            if resp.status_code == 200:
+                data = resp.json()
+                raw_results = data.get("results", [])
+                normalized = []
+                cache_batch = []
+
+                for r in raw_results:
+                    cmte_id = r.get("committee_id") or ""
+                    cmte_name = r.get("name") or ""
+                    cmte_tp = r.get("committee_type") or ""
+                    type_label = FEC_SHORT_TYPE_LABELS.get(cmte_tp, r.get("committee_type_full") or f"PAC ({cmte_tp})")
+                    conn_org = r.get("affiliated_committee_name") or ""
+                    if conn_org == "NONE":
+                        conn_org = ""
+                    tres_name = r.get("treasurer_name") or ""
+                    state = r.get("state") or ""
+                    party = r.get("party") or ""
+                    cycles = r.get("cycles") or []
+                    cycle = max(cycles) if cycles else 2026
+
+                    item = {
+                        "cmte_id": cmte_id,
+                        "name": cmte_name,
+                        "cmte_type": cmte_tp,
+                        "type_label": type_label,
+                        "connected_org": conn_org,
+                        "treasurer": tres_name,
+                        "state": state,
+                        "party": party,
+                        "cycle": cycle,
+                        "type": "fec_committee"
+                    }
+                    normalized.append(item)
+
+                    if self.storage and cmte_id and cmte_name:
+                        clean_tres = normalize_person_name(tres_name)
+                        clean_conn = normalize_person_name(conn_org)
+                        city = r.get("city") or ""
+                        zip_code = r.get("zip") or ""
+                        cmte_dsg = r.get("designation") or ""
+                        org_tp = r.get("organization_type") or ""
+                        cache_batch.append((
+                            cmte_id, cmte_name, tres_name, clean_tres, city, state, zip_code,
+                            cmte_dsg, cmte_tp, party, org_tp, conn_org, clean_conn, "", cycle
+                        ))
+
+                if self.storage and cache_batch:
+                    try:
+                        self.storage.upsert_fec_committees(cache_batch)
+                    except Exception as e:
+                        logger.debug(f"Could not cache live FEC search results into DuckDB: {e}")
+
+                return normalized[:limit]
+            else:
+                logger.warning(f"OpenFEC committee search returned status {resp.status_code}: {resp.text[:120]}")
+        except Exception as e:
+            logger.error(f"Error querying OpenFEC API for '{clean_q}': {e}")
+
+        return []
+
+    def get_committee_profile(self, cmte_id_or_name: str) -> Optional[Dict[str, Any]]:
+        """Fetch detailed FEC committee profile live from OpenFEC API or local cache.
+
+        Args:
+            cmte_id_or_name: FEC Committee ID (e.g. 'C00634261') or committee name (e.g. 'Defend US PAC').
+
+        Returns:
+            Dictionary formatted to match storage.get_fec_committee() schema, or None if not found.
+        """
+        clean_input = cmte_id_or_name.strip()
+        if not clean_input:
+            return None
+
+        # 1. Check local DB first if storage is present
+        if self.storage:
+            cached = self.storage.get_fec_committee(clean_input)
+            if cached and cached.get("name"):
+                return cached
+
+        # 2. Check if clean_input is an FEC ID (C + 8 digits) or a name
+        import re
+        is_id = bool(re.match(r"^C\d{8}$", clean_input, re.IGNORECASE))
+        target_id = clean_input.upper() if is_id else None
+
+        if not target_id:
+            # Query live OpenFEC search to resolve committee name into committee ID
+            search_results = self.search_committees(clean_input, limit=5)
+            if search_results:
+                target_id = search_results[0].get("cmte_id")
+
+        if not target_id:
+            return None
+
+        # Re-check local storage with resolved target_id
+        if self.storage:
+            cached = self.storage.get_fec_committee(target_id)
+            if cached and cached.get("name"):
+                return cached
+
+        url = f"{FEC_API_BASE_URL}/committee/{target_id}/"
+        params: Dict[str, Any] = {"api_key": self.api_key}
+
+        try:
+            time.sleep(self.rate_limit_delay)
+            # SECURITY: Enforce request timeout to avoid hung network connections
+            resp = self.session.get(url, params=params, timeout=12)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results", [])
+                if not results:
+                    return None
+                r = results[0]
+                cmte_name = r.get("name") or ""
+                cmte_tp = r.get("committee_type") or ""
+                type_label = FEC_TYPE_LABELS.get(cmte_tp, r.get("committee_type_full") or f"PAC ({cmte_tp})")
+                tres_name = r.get("treasurer_name") or ""
+                conn_org = r.get("affiliated_committee_name") or ""
+                if conn_org == "NONE":
+                    conn_org = ""
+                city = r.get("city") or ""
+                state = r.get("state") or ""
+                zip_code = r.get("zip") or ""
+                cmte_dsg = r.get("designation") or ""
+                party = r.get("party") or ""
+                org_tp = r.get("organization_type") or ""
+                cycles = r.get("cycles") or []
+                cycle = max(cycles) if cycles else 2026
+
+                clean_tres = normalize_person_name(tres_name)
+                clean_conn = normalize_person_name(conn_org)
+
+                # Upsert into storage so local lookups succeed immediately
+                if self.storage:
+                    try:
+                        self.storage.upsert_fec_committees([(
+                            target_id, cmte_name, tres_name, clean_tres, city, state, zip_code,
+                            cmte_dsg, cmte_tp, party, org_tp, conn_org, clean_conn, "", cycle
+                        )])
+                    except Exception as e:
+                        logger.debug(f"Could not cache live committee {target_id} into DuckDB: {e}")
+
+                profile = {
+                    "cmte_id": target_id,
+                    "name": cmte_name,
+                    "cmte_name": cmte_name,
+                    "treasurer": tres_name,
+                    "treasurer_name": tres_name,
+                    "clean_treasurer": clean_tres,
+                    "city": city,
+                    "state": state,
+                    "zip": zip_code,
+                    "cmte_designation": cmte_dsg,
+                    "cmte_type": cmte_tp,
+                    "type_label": type_label,
+                    "party": party,
+                    "org_type": org_tp,
+                    "connected_org": conn_org,
+                    "candidate_id": "",
+                    "cycle": cycle,
+                    "candidates": [],
+                    "expenditures_summary": {
+                        "supporting": [],
+                        "opposing": [],
+                        "contributions": []
+                    },
+                    "top_vendors": []
+                }
+                return profile
+            else:
+                logger.warning(f"OpenFEC committee lookup for {target_id} returned status {resp.status_code}")
+        except Exception as e:
+            logger.error(f"Error fetching committee {target_id} from OpenFEC: {e}")
+
+        return None
